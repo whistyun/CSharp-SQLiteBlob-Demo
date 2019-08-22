@@ -1,19 +1,15 @@
 # CSharp-SQLiteBlob-Demo
 
-This project is the sample of SQLite Blob that is implemented by System.Data.SQLite.
+System.Data.SQLiteにてSQLiteBlobを使用する方法をまとめたサンプルソースです。
 
-We cat treat binary data as BLOB in SQLite. 
-In  .NET Framework, We cat treat it as either byte-arary or SQLiteBlob.
+SQLiteではバイナリデータをBLOB型として扱うことができます。DotNetFrameworkからはバイナリ全体をbyte配列として扱うことができますが、SQLiteBlobを使用することで、バイナリの一部分を少しずつ取り扱うことができます。
 
-The example of byte-array is provided in [Stackoverflow](https://stackoverflow.com/questions/625029/how-do-i-store-and-retrieve-a-blob-from-sqlite), But I can't find a memory saving example of SQLiteBLob.
+ここでは、SQLiteBlobの取得方法の説明を行います。byte配列として扱うので十分であれば、
+[StackOverflowに簡潔な例があるので](https://stackoverflow.com/questions/625029/how-do-i-store-and-retrieve-a-blob-from-sqlite)、そちらを参照してください。
 
-So I try to make it.
+## BLOB型を持つ表の例
 
-
-## The example table, it has the blob-column.
-
-
-At first, given the table that has the blob column.
+サンプルでは、BLOBのカラムとタプルを識別するためのidのみの単純な表を使用します。
 
 ```sql
 create table binary_storage( 
@@ -22,13 +18,16 @@ create table binary_storage(
 )
 ```
 
-Although we can add some column to it, If we use SQLiteDataReader.GetBlob, We should remember the bellow promise.
+列を追加することはできますが、SQLiteDataReader.GetBlobを使用してSQLiteBlobを取得する場合、System.Data.SQLiteの実装上の問題により以下のルールを守る必要があります。
 
-1. Should set "CommandBehavior.KeyInfo" to select-statement
-2. Must not change the column name of the column that is blob in select-statement. Or provide an alternative of it.
-3. Should not use join-statement (It's not sure).
+1. CommandBehavior.KeyInfoの指定が必要
+2. SQLiteDataReaderを得るためのSelect文では、Blob型のカラムに別名をつけてはならない。もしくは元のカラム名を保持する
+3. SQLiteDataReaderを得るためのSelect文では、Blob型のカラムが定義されているテーブルは結合すべきでない？(駆動表にしていれば問題ない？)
 
-## The example in 1.0.108.0
+上記の問題を鑑みると、バイナリデータの管理は専用のシンプルなテーブルを用意したほうが無難です。
+
+
+## SQLiteBlobの取得方法(version 1.0.108.0)
 
 ### Insert
 ```cs
@@ -38,8 +37,7 @@ long InsertDataBlob108(SQLiteConnection con, Stream inStream)
 
     using (var cmd = new SQLiteCommand(con))
     {
-        // At fisrst, we must reserve free space.
-        // So we make new row with zeroblob.
+        // 事前に空のBLOBでインサート(必要なサイズはこの時点で決める)
         // see: https://sqlite.org/c3ref/blob_write.html
         cmd.CommandText = @"
             insert into binary_storage (
@@ -52,16 +50,18 @@ long InsertDataBlob108(SQLiteConnection con, Stream inStream)
         cmd.ExecuteNonQuery();
 
         cmd.Reset();
-        // In SQLite, The column that is defined as "integer PRIMARY KEY" is 
-        // another alias for the rowid.
+        // 主キー(= rowid)取得。
+        // SQLiteでは、integer PRIMARY KEYとしたカラムはrowidの別名
         // see: https://sqlite.org/c3ref/last_insert_rowid.html
         cmd.CommandText = "select last_insert_rowid()";
         var id = (long)cmd.ExecuteScalar();
 
         cmd.Reset();
-        // To get SQLite Blob, We retrieve the row inserted
-        // Note: This statement alias rowid to blob's column name.
-	//       If a blob column is specified directly, its contents will consume  memory. 
+        // SQLiteBlobを使用するために、上でインサートした行を取得する。
+        // ここでは、rowidにblob型カラムの名称をつけることで、
+        // blobデータを取得せずに(blobの内容をメモリに展開せずに)
+        // System.Data.SQLiteにblob型カラムの名称を渡すことができる。
+
         // see: https://sqlite.org/c3ref/blob.html
         //      https://sqlite.org/c3ref/blob_open.html
         cmd.CommandText = @"
@@ -73,7 +73,9 @@ long InsertDataBlob108(SQLiteConnection con, Stream inStream)
         {
             reader.Read();
 
-            // The replacement column of blob is set.
+            // 本来、GetBlobにはblob型カラムの名称が解るカラムを
+            // 指定する必要が、Select文にてBlob型カラムの名称を
+            // 別名としてつけることで誤魔化す。
             using (var blob = reader.GetBlob(0, false))
             {
                 byte[] buffer = new byte[BUFFER_SIZE];
@@ -102,8 +104,7 @@ void SelectDataBlob108(SQLiteConnection con, long id, Stream outStream)
 {
     using (var cmd = new SQLiteCommand(con))
     {
-        // SQLiteBlob does not provide the BLOB size.
-	// This statement is get the target row and measure the BLOB size.
+        // blobのサイズが解らないとどこまで読み込めばよいかわからない
         cmd.CommandText = @"
             select
                 rowid       as bin,
@@ -143,13 +144,12 @@ void SelectDataBlob108(SQLiteConnection con, long id, Stream outStream)
 }
 ```
 
+## SQLiteBlobの取得方法(version 1.0.109.0以降)
 
-## The example in 1.0.109.0 and later
+1.0.109.0にて、SQLiteBlobに新しいメソッド(Create)が追加されました。
+このメソッドは、[Incremental I/O](https://sqlite.org/c3ref/blob_open.html)のラッパーとして使用できます。
 
-
-At version 1.0.109.0, The library provid SQLiteBlob.Crate.
-
-It is the wapper of [Incremental I/O](https://sqlite.org/c3ref/blob_open.html).
+ここでは、Insert文のみ例として挙げます(Select文は108とほとんど同じばかりか、むしろコード量が増えるため)。
 
 ### Insert
 ```cs
@@ -159,6 +159,8 @@ long InsertDataBlob109(SQLiteConnection con, Stream inStream)
 
     using (var cmd = new SQLiteCommand(con))
     {
+        // 事前に空のBLOBでインサート(必要なサイズはこの時点で決める)
+        // see: https://sqlite.org/c3ref/blob_write.html
         cmd.CommandText = @"
             insert into binary_storage (
                 bin
@@ -170,6 +172,9 @@ long InsertDataBlob109(SQLiteConnection con, Stream inStream)
         cmd.ExecuteNonQuery();
 
         cmd.Reset();
+        // 主キー(= rowid)取得。
+        // SQLiteでは、integer PRIMARY KEYとしたカラムはrowidの別名
+        // see: https://sqlite.org/c3ref/last_insert_rowid.html
         cmd.CommandText = "select last_insert_rowid()";
         var id = (long)cmd.ExecuteScalar();
 
